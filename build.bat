@@ -1,7 +1,7 @@
 @echo off
 
 
-clang main.cpp -g -o out.exe
+clang main.cpp profiler.cpp -g -o out.exe -Iexternal
 
 if ["%1"]==["run"] (
     out.exe

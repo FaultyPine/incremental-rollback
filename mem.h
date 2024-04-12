@@ -24,6 +24,7 @@ struct Buffer
 {
     char* data;
     u32 size;
+    bool operator==(const Buffer& buf) const { return data == buf.data && size == buf.size; }
 };
 struct AddressArray
 {
