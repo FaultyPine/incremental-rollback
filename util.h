@@ -24,7 +24,7 @@ typedef double f64;
 #define GIGABYTES_BYTES(gb) (gb*MEGABYTES_BYTES(1024))
 
 
-u32 HashBytes(char* data, u32 size)
+inline u32 HashBytes(char* data, u32 size)
 {
     // FNV-1 hash -> doing the *PRIME, and THEN the XOR.
     // FNV-1a hash -> doing the XOR, then the *PRIME
