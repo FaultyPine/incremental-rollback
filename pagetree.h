@@ -13,6 +13,7 @@ struct PageTree
     void Insert(T page);
     bool Find(T bufToFind, T& out) const;
     void Print() const;
+    void Clear();
     std::vector<T> pages = {};
 };
 

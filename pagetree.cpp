@@ -103,3 +103,9 @@ void PageTree<T>::Print() const
     u32 idx = 0;
     HelpPrint(pages, idx);
 }
+
+template <typename T>
+void PageTree<T>::Clear()
+{
+    pages.clear();
+}

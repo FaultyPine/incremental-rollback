@@ -112,8 +112,12 @@ void GetAndResetWrittenPages(std::vector<AddressArray>& out)
         DWORD PageSize = 0;
         ULONG_PTR numAddresses = buf.changedPages.Count;
         // gets changed pages in the specified alloc block (base.data, base.count)
-        if (GetWriteWatch(WRITE_WATCH_FLAG_RESET, buf.buffer.data, buf.buffer.size, buf.changedPages.Addresses,
-                            &numAddresses, &PageSize) == 0)
+        UINT result;
+        { PROFILE_SCOPE("GetWriteWatch");
+            result = GetWriteWatch(WRITE_WATCH_FLAG_RESET, buf.buffer.data, buf.buffer.size, buf.changedPages.Addresses,
+                            &numAddresses, &PageSize);
+        }
+        if (result == 0)
         {
             AddressArray changed;
             changed.Addresses = buf.changedPages.Addresses;
