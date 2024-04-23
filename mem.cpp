@@ -97,9 +97,7 @@ void ResetWrittenPages()
     for (TrackedBuffer& buf : TrackedMemList)
     {
         DWORD PageSize = 0;
-        // gets changed pages in the specified alloc block (base.data, base.count)
-        GetWriteWatch(WRITE_WATCH_FLAG_RESET, buf.buffer.data, buf.buffer.size, buf.changedPages.Addresses,
-                            &buf.changedPages.Count, &PageSize);
+        ResetWriteWatch(buf.buffer.data, buf.buffer.size);
     }
 }
 

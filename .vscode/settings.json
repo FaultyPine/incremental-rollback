@@ -67,6 +67,9 @@
         "queue": "cpp",
         "ranges": "cpp",
         "shared_mutex": "cpp",
-        "span": "cpp"
+        "span": "cpp",
+        "set": "cpp",
+        "xtree": "cpp",
+        "static.c": "cpp"
     }
 }

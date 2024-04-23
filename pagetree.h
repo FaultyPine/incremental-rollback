@@ -7,6 +7,8 @@
 // Built on the assumption that our allocations are all fixed size (1 page large).
 // could be modified to accept variable-size allocations too, but this makes things a lot simpler
 
+// TODO: balance the tree. Prioritize lookup speed - they need to be very very fast
+
 template <typename T>
 struct PageTree
 {

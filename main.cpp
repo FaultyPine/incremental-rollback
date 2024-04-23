@@ -6,11 +6,37 @@
 
 #include <set>
 
+#include "external/mimalloc/src/static.c"
+
 #define MAX_ROLLBACK_FRAMES 7
 #define NUM_TEST_FRAMES_TO_SIMULATE 50
 #define GAMESTATE_SIZE MEGABYTES_BYTES(170)
 
 #define ENABLE_LOGGING
+// should be ~1500 for real perf testing
+constexpr u32 NUM_RANDOM_WRITES_PER_FRAME = 10;
+
+
+// FUTURE: go faster than memcpy - https://squadrick.dev/journal/going-faster-than-memcpy.html
+// we have very specific restrictions on the blocks of mem we move around
+// always page-sized, and pages are always aligned... surely there's some wins there. Also very easy to parallelize
+
+// TODO:
+// - figure out how/why beforeSnapshots have frames from way in the past.
+//      Changing the rollback to use afterSnapshots made all the frame numbers line up, but that doesn't make much sense
+//      since I would think we'd need to rollback to the beginning of a frame, not after changes have been made.
+//      so why do beforeSnapshots not have the correct frames? (or have frames from a while ago)
+// - Test in dolphin - make really sure I know how many pages are changed in an average p+ game.
+//      track mem1 and mem2 but ALSO track the other memory regions (fake vram, other stuff?) if possible. 
+//      Test to absolutely make sure I know what kind of
+//      perf environment im working with (in terms of how many pages are changed on average during a normal game)
+//      ---------
+//      RESULTS OF DOLPHIN TESTS
+//          Getting a little over ~1500 changed pages (which is ~6mb) per frame during gameplay. This is for ALL of dolphin mem
+//          replaced dolphin's backing pagefile with one big VirtualAlloc. Replaced MapViewOfFile and related calls
+//          with just returning a pointer into the big backing memory block.
+//          Tracking that entire arena is about 170mb, and includes stuff like L1 cache, fake vmem, mem1, mem2
+
 
 struct PageSnapshot
 {
@@ -33,6 +59,7 @@ struct Savestate
     PageTree<PageSnapshot> afterSnapshots = {};
     PageTree<PageSnapshot> beforeSnapshots = {};
     bool valid = false;
+    u32 frame = 0;
 };
 
 struct SavestateInfo
@@ -47,12 +74,14 @@ SavestateInfo savestateInfo = {};
 char* gameState = nullptr;
 
 char* GetGameState() { return gameState; }
+u32* GetGameMemFrame() { return (u32*)gameState; } // first 4 bytes of game mem are the current frame
 
-void RandomWrites(u32 numWrites, bool isInit);
+void GameSimulateFrame(u32 currentFrame, u32 numWrites);
 
-void Init()
+void Init(u32& currentFrame)
 {
     PROFILE_FUNCTION();
+    currentFrame = 0;
     char* gameMem = GetGameState();
     // gamestate is the only memory we want to track
     if (gameMem != nullptr)
@@ -60,18 +89,25 @@ void Init()
         TrackedFree(gameMem);
     }
     gameState = (char*)TrackedAlloc(GAMESTATE_SIZE);
-    RandomWrites(345678, true); // do some writes on init to emulate the initial gamestate when we boot a game/match
     ResetWrittenPages(); // reset written pages since this is supposed to be initial state
 }
 
-u32 spotToWrite = GAMESTATE_SIZE / 2; // arbitrary
-void RandomWrites(u32 numWrites, bool isInitWrites = false)
+// byte index into game mem block
+u64 spotToWrite = GAMESTATE_SIZE / 2; // arbitrary
+void GameSimulateFrame(u32 currentFrame, u32 numWrites)
 {
     PROFILE_FUNCTION();
     u64 pageSize = (u64)GetPageSize();
     char* gameMem = GetGameState();
     if (!gameMem) return;
     std::set<void*> writtenPages = {};
+    // for debugging. Write to the first 4 bytes of game mem every frame indicating the current 
+    *GetGameMemFrame() = currentFrame; 
+    /*
+    u32 hash = currentFrame % 5;
+    hash = HashBytes((char*)&hash, sizeof(hash));
+    srand(hash);
+    */
     auto start = std::chrono::high_resolution_clock::now();
     // do some random writes to random spots in mem
     for (int i = 0; i < numWrites; i++)
@@ -79,36 +115,100 @@ void RandomWrites(u32 numWrites, bool isInitWrites = false)
         void* unalignedSpot = (void*)(gameMem + spotToWrite);
         void* pageAligned = (void*)(((u64)unalignedSpot) & ~(pageSize-1));
         writtenPages.insert(pageAligned);
-        gameMem[spotToWrite] = spotToWrite * i; // arbitrary
-        auto stop = std::chrono::high_resolution_clock::now();
-        auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(stop - start);
-        auto timecount = duration.count();
-        srand(timecount+i);
+        /*
         if (rand() % 2 == 0)
         {
             spotToWrite = HashBytes((char*)&spotToWrite, sizeof(spotToWrite)) ;
         }
+        */
+        spotToWrite = spotToWrite - ((u64)gameMem) + pageSize + (pageSize/2);
         spotToWrite = spotToWrite % GAMESTATE_SIZE;
+        *(u32*)(&gameMem[spotToWrite]) = spotToWrite; // do some arbitrary write
     }
     auto stop = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(stop - start);
     auto timecount = duration.count();
     #ifdef ENABLE_LOGGING
-    printf("RandomWrites %llu ms\n", timecount);
-    if (!isInitWrites)
+    printf("GameSimulateFrame %llu ms [frame %i] [wrote %u pages]\n", timecount, currentFrame, writtenPages.size());
+    /*if (currentFrame > 0)
     {
         for (void* x : writtenPages)
         {
             printf("Wrote to page %p\n", x);
         }
-    }
+    }*/
     #endif
 }
 
-// pastFrame represents the frame to rollback to
-void Rollback(u32 pastFrame)
+s32 Wrap(s32 x, s32 wrap)
 {
-    // TODO:
+    if (x < 0) x = (wrap + x);
+    return abs(x) % wrap;
+}
+
+void* TryFindBasePage(const PageTree<PageSnapshot>& pages)
+{
+    for (const PageSnapshot& snap : pages.pages)
+    {
+        if (snap.originalAddress == GetGameState())
+        {
+            return snap.originalAddress;
+        }
+    }
+    return nullptr;
+}
+
+void Rollback(u32& currentFrame, u32 rollbackFrame)
+{
+    if (currentFrame < MAX_ROLLBACK_FRAMES) return;
+    u32 pageSize = GetPageSize();
+    char* gameMem = GetGameState();
+    s32 savestateOffset = currentFrame-rollbackFrame;
+    assert(rollbackFrame < currentFrame && savestateOffset < MAX_ROLLBACK_FRAMES);
+    s32 currentSavestateIdx = currentFrame % MAX_ROLLBACK_FRAMES;
+    s32 savestateIdx = Wrap(currentSavestateIdx - savestateOffset, MAX_ROLLBACK_FRAMES);
+    assert(savestateIdx < MAX_ROLLBACK_FRAMES && savestateIdx != currentSavestateIdx);
+    #ifdef ENABLE_LOGGING
+    printf("Starting at game mem frame %i\n", *GetGameMemFrame());
+    printf("Rolling back %i frames from idx %i -> %i\n", savestateOffset, currentSavestateIdx, savestateIdx);
+    printf("Savestate frames stored:\n");
+    for (u32 i = 0; i < MAX_ROLLBACK_FRAMES; i++)
+    {
+        printf("idx %u = frame %u |\t", i, savestateInfo.savestates[i].frame);
+    }
+    printf("\n");
+    #endif
+    // given an index into our savestates list, rollback to that.
+    // go from the current index, walking backward applying each savestate's "before" snapshots
+    // one at a time
+    while (currentSavestateIdx != savestateIdx)
+    {
+        Savestate& savestate = savestateInfo.savestates[currentSavestateIdx];  
+        if (savestate.valid)
+        {
+            for (PageSnapshot& pageSnapshot : savestate.beforeSnapshots.pages)
+            {
+                if (pageSnapshot.originalAddress != nullptr)
+                {
+                    #ifdef ENABLE_LOGGING
+                    assert(pageSnapshot.originalAddress >= GetGameState() && pageSnapshot.originalAddress < GetGameState() + GAMESTATE_SIZE);
+                    // first 4 bytes of game mem contains current frame
+                    if (pageSnapshot.originalAddress == gameMem) 
+                    {
+                        u32 nowFrame = *GetGameMemFrame();
+                        printf("rolling back %u -> %u\n", nowFrame, ((u32*)pageSnapshot.dataCopy)[0]);
+                    }
+                    #endif
+                    memcpy(pageSnapshot.originalAddress, pageSnapshot.dataCopy, pageSize);
+                }
+            }
+            #ifdef ENABLE_LOGGING
+            printf("Rolled back savestate idx %i\n", currentSavestateIdx);
+            #endif
+        }
+        currentSavestateIdx = Wrap(currentSavestateIdx-1, MAX_ROLLBACK_FRAMES);
+    }
+    currentFrame = rollbackFrame;
 }
 
 // does this savestate contain region that was just written to? If so, return that region through out
@@ -120,14 +220,9 @@ bool DoesSavestateContainCorrespondingUnwrittenRegion(const Savestate& savestate
     PageSnapshot out;
     // don't need to search before *and* after snapshots - just one or the other.
     // because they will have the same original gamestate addresses
-    bool found = savestate.afterSnapshots.Find(in, out);
+    bool found = savestate.beforeSnapshots.Find(in, out);
     outBuffer = (char*)out.dataCopy;
     return found;
-}
-
-u32 Wrap(u32 x, u32 wrap)
-{
-    return abs((s32)x) % wrap;
 }
 
 // this takes in a page that has been written to
@@ -152,7 +247,7 @@ char* GetUnwrittenPageFromWrittenPage(char* newGameMemWrittenData, u32 savestate
         if (DoesSavestateContainCorrespondingUnwrittenRegion(currentSavestate, newGameMemWrittenData, unwrittenRegion))
         {
             #ifdef ENABLE_LOGGING
-            printf("Found %p while looking for %p\n", unwrittenRegion, newGameMemWrittenData);
+            printf("Found %p while looking for %p  frame %u\n", unwrittenRegion, newGameMemWrittenData, currentSavestate.frame);
             #endif
             return unwrittenRegion;
         }
@@ -164,16 +259,23 @@ char* GetUnwrittenPageFromWrittenPage(char* newGameMemWrittenData, u32 savestate
     u64 writtenRegionOffsetFromBase = ((u64)newGameMemWrittenData) - ((u64)GetGameState());
     char* unwrittenSnapshotData = savestateInfo.fullSnapshot + writtenRegionOffsetFromBase;
     #ifdef ENABLE_LOGGING
-    printf("Fell back to full snapshot trying to find %p\n", newGameMemWrittenData);
+    //printf("Fell back to full snapshot trying to find %p\n", newGameMemWrittenData);
     #endif
     return unwrittenSnapshotData; // NOTE: returning pointer from our full snapshot. THis is not from gamestate mem
 }
 
-// TODO: fixed size allocator
+// PERF: fixed size allocator
+// malloc is wicked slow holy shit
 void* AllocAndCopy(char* src, u32 size)
 {
-    void* result = malloc(size);
-    memcpy(result, src, size);
+    PROFILE_FUNCTION();
+    void* result;
+    { PROFILE_SCOPE("malloc");
+        result = mi_malloc(size);
+    }
+    { PROFILE_SCOPE("memcpy");
+        memcpy(result, src, size);
+    }
     return result;
 }
 
@@ -217,12 +319,12 @@ void EvictSavestate(Savestate& savestate)
     //  free up all the page snapshots tied to it
     for (PageSnapshot& snap : savestate.beforeSnapshots.pages)
     {
-        free(snap.dataCopy);
+        mi_free(snap.dataCopy);
     }
     savestate.beforeSnapshots.Clear();
     for (PageSnapshot& snap : savestate.afterSnapshots.pages)
     {
-        free(snap.dataCopy);
+        mi_free(snap.dataCopy);
     }
     savestate.afterSnapshots.Clear();
     savestate.valid = false;
@@ -238,6 +340,7 @@ void SaveWrittenPages(u32 frame)
     {
         EvictSavestate(savestateInfo.savestates[savestateHead]);
     }
+    savestateInfo.savestates[savestateHead].frame = frame;
     size_t numChangedBytes = 0;
     size_t numChangedPages = 0;
     u32 pageSize = GetPageSize();
@@ -259,7 +362,7 @@ void SaveWrittenPages(u32 frame)
     #endif
 }
 
-bool Tick(u32 frame)
+bool Tick(u32& frame)
 {
     PROFILER_FRAME_MARK();
     PROFILE_FUNCTION();
@@ -273,10 +376,10 @@ bool Tick(u32 frame)
         // full snapshot
         if (savestateInfo.fullSnapshot)
         {
-            free(savestateInfo.fullSnapshot);
+            mi_free(savestateInfo.fullSnapshot);
             savestateInfo.fullSnapshot = nullptr;
         }
-        savestateInfo.fullSnapshot = (char*)malloc(GAMESTATE_SIZE);
+        savestateInfo.fullSnapshot = (char*)mi_malloc(GAMESTATE_SIZE);
         memcpy(savestateInfo.fullSnapshot, GetGameState(), GAMESTATE_SIZE);
         auto stop = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(stop - start);
@@ -285,26 +388,50 @@ bool Tick(u32 frame)
     }
 
     // mess with our game memory. This is to simulate the game sim
-    RandomWrites(10);
+    GameSimulateFrame(frame, NUM_RANDOM_WRITES_PER_FRAME);
     // whatever changes we made above, save those
     SaveWrittenPages(frame);
+    constexpr u32 NUM_FRAMES_TO_ROLLBACK = 5;
+    if (frame % 15 == 0)
+    {
+        // rollback
+        u32 originalFrame = frame;
+        u32 frameToRollbackTo = frame - NUM_FRAMES_TO_ROLLBACK;
+        Rollback(frame, frameToRollbackTo);
+        #ifdef ENABLE_LOGGING
+        printf("Rolled back to frame %i\n", *GetGameMemFrame());
+        #endif
+        // resim
+        for (u32 i = frameToRollbackTo; i <= originalFrame; i++)
+        {
+            GameSimulateFrame(i, NUM_RANDOM_WRITES_PER_FRAME);
+            frame++;
+        }
+        #ifdef ENABLE_LOGGING
+        printf("Resimulated back to frame %i\n", *GetGameMemFrame());
+        #endif
+        assert(originalFrame == *GetGameMemFrame());
+        ResetWrittenPages();
+    }
 
     #ifdef ENABLE_LOGGING
     auto stop = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(stop - start);
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(stop - start);
     auto timecount = duration.count();
-    printf("Frame %i took %llu microsec\n", frame, timecount);
+    printf("Frame %i took %llu ms\n", frame, timecount);
     #endif
     // tmp for testing. Should test for more frames later when savestates are properly evicted
-    return frame < NUM_TEST_FRAMES_TO_SIMULATE;
+    bool shouldExit = frame < NUM_TEST_FRAMES_TO_SIMULATE;
+    frame++;
+    return shouldExit;
 }
 
 u32 frame = 0;
 int main()
 {
     frame = 0;
-    Init();
-    while (Tick(frame++)) {}
+    Init(frame);
+    while (Tick(frame)) {}
     #ifdef _WIN32
     system("pause");
     #endif
