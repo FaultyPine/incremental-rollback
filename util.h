@@ -17,7 +17,22 @@ typedef unsigned long long u64;
 typedef float f32;
 typedef double f64;
 
+#ifndef ARRAY_SIZE
+#define ARRAY_SIZE(arr) ( sizeof((arr))/sizeof((arr)[0]) )
+#endif
 
+template <typename T> 
+inline T Clamp(T& value, const T& low, const T& high) 
+{
+    return value < low ? low : (value > high ? high : value); 
+}
+
+template <typename T>
+inline T PercentOf(T x, u32 percentOutOf100)
+{
+    percentOutOf100 = Clamp(percentOutOf100, 0u, 100u);
+    return (x * percentOutOf100) / 100;
+}
 
 #define KILOBYTES_BYTES(kb) (kb*1024)
 #define MEGABYTES_BYTES(mb) (mb*KILOBYTES_BYTES(1024))

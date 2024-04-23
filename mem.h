@@ -29,4 +29,4 @@ void TrackedFree(char* ptr);
 char* TrackedAlloc(size_t size);
 void PrintTrackedBuf(const TrackedBuffer& buf);
 void ResetWrittenPages();
-void GetAndResetWrittenPages(std::vector<AddressArray>& out);
+bool GetAndResetWrittenPages(void** changedPageAddresses, u64* numChangedPages, u64 maxEntries);

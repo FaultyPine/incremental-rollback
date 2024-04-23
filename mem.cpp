@@ -118,27 +118,31 @@ void ResetWrittenPages()
     }
 }
 
-// [i].Count here represents the total number of CHANGED pages
-void GetAndResetWrittenPages(std::vector<AddressArray>& out)
+
+bool GetAndResetWrittenPages(void** changedPageAddresses, u64* numChangedPages, u64 maxEntries)
 {
     PROFILE_FUNCTION();
+    *numChangedPages = 0;
     for (TrackedBuffer& buf : TrackedMemList)
     {
+        // on input to GetWriteWatch this is the maximum number of possible changed pages in this allocation
+        // on output, this is the number of page addresses that have been changed
+        u64 pageCount = buf.changedPages.Count; 
         DWORD PageSize = 0;
-        ULONG_PTR numAddresses = buf.changedPages.Count;
-        // gets changed pages in the specified alloc block (base.data, base.count)
         UINT result;
+        // move forward by the number of changed pages. 
+        void** addressesBase = (void**)((u64**)changedPageAddresses + *numChangedPages);
         { PROFILE_SCOPE("GetWriteWatch");
+            // get changed pages for specified buffer (buffer.data, buffer.size)
             // NOTE: addresses returned here are sorted (ascending)
-            result = GetWriteWatch(WRITE_WATCH_FLAG_RESET, buf.buffer.data, buf.buffer.size, buf.changedPages.Addresses,
-                            &numAddresses, &PageSize);
+            result = GetWriteWatch(WRITE_WATCH_FLAG_RESET, buf.buffer.data, buf.buffer.size, addressesBase,
+                            &pageCount, &PageSize);
         }
-        if (result == 0)
+        *numChangedPages += pageCount;
+        if (result != 0 || pageCount > maxEntries || *numChangedPages > maxEntries)
         {
-            AddressArray changed;
-            changed.Addresses = buf.changedPages.Addresses;
-            changed.Count = numAddresses;
-            out.push_back(changed);
+            return false;
         }
     }
+    return true;
 }
