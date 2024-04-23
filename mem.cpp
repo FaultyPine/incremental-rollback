@@ -1,6 +1,23 @@
 #include "mem.h"
 #include "profiler.h"
 
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#else
+#include <pthread.h>
+#include <stdio.h>
+#include <sys/mman.h>
+#include <sys/types.h>
+#if defined __APPLE__ || defined __FreeBSD__ || defined __OpenBSD__ || defined __NetBSD__
+#include <sys/sysctl.h>
+#elif defined __HAIKU__
+#include <OS.h>
+#else
+#include <sys/sysinfo.h>
+#endif
+#endif
+
 // the [i].AddressArray.Count here represents the total number of pages in this allocation
 static std::vector<TrackedBuffer> TrackedMemList = {};
 
@@ -15,7 +32,7 @@ u32 GetPageSize()
     return cachedPageSize;
 }
 
-// https://github.com/cmuratori/computer_enhance/blob/main/perfaware/part3/listing_0122_write_watch_main.cpp
+// called on a buffer allocated with VirtualAlloc and MEM_WRITE_WATCH flag
 void HandleNewAllocationTracking(void* ptr, size_t size)
 {
     if (!ptr || !size)
@@ -112,6 +129,7 @@ void GetAndResetWrittenPages(std::vector<AddressArray>& out)
         // gets changed pages in the specified alloc block (base.data, base.count)
         UINT result;
         { PROFILE_SCOPE("GetWriteWatch");
+            // NOTE: addresses returned here are sorted (ascending)
             result = GetWriteWatch(WRITE_WATCH_FLAG_RESET, buf.buffer.data, buf.buffer.size, buf.changedPages.Addresses,
                             &numAddresses, &PageSize);
         }

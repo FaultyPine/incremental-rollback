@@ -36,7 +36,9 @@ constexpr u32 NUM_RANDOM_WRITES_PER_FRAME = 10;
 //          replaced dolphin's backing pagefile with one big VirtualAlloc. Replaced MapViewOfFile and related calls
 //          with just returning a pointer into the big backing memory block.
 //          Tracking that entire arena is about 170mb, and includes stuff like L1 cache, fake vmem, mem1, mem2
-
+// - NOTE: GetWriteWatch returns it's addresses in ascending order! We can exploit this to speed up our tree/lookup stuff
+//      instead of inserting each written page into a tree-like structure. We could just memcpy the changed addresses in
+//      that array of addresses could already be bsearched, so we would just need to iterate it and make our copies
 
 struct PageSnapshot
 {
