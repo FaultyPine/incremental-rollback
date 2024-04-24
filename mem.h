@@ -30,3 +30,6 @@ char* TrackedAlloc(size_t size);
 void PrintTrackedBuf(const TrackedBuffer& buf);
 void ResetWrittenPages();
 bool GetAndResetWrittenPages(void** changedPageAddresses, u64* numChangedPages, u64 maxEntries);
+
+// TODO: test/benchmark this
+void fastMemcpy(void *pvDest, void *pvSrc, size_t nBytes);
