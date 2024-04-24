@@ -8,12 +8,15 @@
 #include "external/mimalloc/src/static.c"
 
 #define MAX_ROLLBACK_FRAMES 7
+#define MAX_SAVESTATES (MAX_ROLLBACK_FRAMES+1)
 #define NUM_TEST_FRAMES_TO_SIMULATE 20
 #define GAMESTATE_SIZE MEGABYTES_BYTES(170)
 
+#ifdef DEBUG
 #define ENABLE_LOGGING
+#endif
 // should be ~1500 for real perf testing
-constexpr u32 NUM_RANDOM_WRITES_PER_FRAME = 10;
+constexpr u32 NUM_RANDOM_WRITES_PER_FRAME = 1500;
 
 
 // FUTURE: go faster than memcpy - https://squadrick.dev/journal/going-faster-than-memcpy.html
@@ -47,10 +50,8 @@ struct Savestate
 {
     // sorted (ascending) list of changed pages
     void* changedPages[MAX_NUM_CHANGED_PAGES] = {}; 
-    // list of pointers to blocks of memory (page sized) that contain data before that page was written to on this frame
-    void* beforeCopies[MAX_NUM_CHANGED_PAGES] = {}; 
-    // same as above ^ but contains data after this frame wrote to the pages
-    void* afterCopies[MAX_NUM_CHANGED_PAGES] = {}; 
+    // page-sized blocks of memory that contains data after this frame wrote to the pages
+    void* afterCopies[MAX_NUM_CHANGED_PAGES] = {};
     u64 numChangedPages = 0;
     u32 frame = 0;
     bool valid = false;
@@ -59,8 +60,7 @@ struct Savestate
 struct SavestateInfo
 {
     char* fullSnapshot = nullptr;
-    // current frame % MAX_ROLLBACK_FRAMES is the index into this for the current frame
-    Savestate savestates[MAX_ROLLBACK_FRAMES] = {};
+    Savestate savestates[MAX_SAVESTATES] = {};
 };  
 
 
@@ -83,6 +83,7 @@ void Init(u32& currentFrame)
         TrackedFree(gameMem);
     }
     gameState = (char*)TrackedAlloc(GAMESTATE_SIZE);
+    assert(IS_ALIGNED(gameState, 32)); // for simd memcpy, need to be 32 byte aligned
     ResetWrittenPages(); // reset written pages since this is supposed to be initial state
 }
 
@@ -126,25 +127,52 @@ s32 Wrap(s32 x, s32 wrap)
     return abs(x) % wrap;
 }
 
-
-void Rollback(s32 currentFrame, u32 rollbackFrame)
+static void RollbackSavestate(const Savestate& savestate)
 {
-    if (currentFrame < MAX_ROLLBACK_FRAMES) return;
-    u32 pageSize = GetPageSize();
     char* gameMem = GetGameState();
+    u32 pageSize = GetPageSize();
+    for (u32 i = 0; i < savestate.numChangedPages; i++)
+    {
+        void* orig = savestate.changedPages[i];
+        // apply the "after" state of this past frame
+        void* ssData = savestate.afterCopies[i];
+        if (orig != nullptr)
+        {
+            #ifdef ENABLE_LOGGING
+            assert(orig >= GetGameState() && orig < GetGameState() + GAMESTATE_SIZE);
+            // first 4 bytes of game mem contains current frame
+            if (orig == gameMem) 
+            {
+                u32 nowFrame = *GetGameMemFrame();
+                printf("rolling back %u -> %u\n", nowFrame, ((u32*)ssData)[0]);
+            }
+            #endif
+            rbMemcpy(orig, ssData, pageSize);
+        }
+    }
+}
 
-    s32 savestateOffset = currentFrame-rollbackFrame;
-    assert(rollbackFrame < currentFrame && savestateOffset < MAX_ROLLBACK_FRAMES);
-    s32 currentSavestateIdx = Wrap(currentFrame-1, MAX_ROLLBACK_FRAMES);
-    s32 savestateIdx = Wrap(currentSavestateIdx - savestateOffset, MAX_ROLLBACK_FRAMES);
+void Rollback(s32 currentFrame, s32 rollbackFrame)
+{
+    PROFILE_FUNCTION();
+    if (currentFrame < MAX_SAVESTATES) return;
+
+    // -1 because all savestates are taken after a frame's simulation
+    // this means if you want to rollback to frame 5, you'd actually need to restore the data captured on frame 4
+    s32 savestateOffset = currentFrame-rollbackFrame-1; 
+    assert(rollbackFrame < currentFrame && savestateOffset < MAX_SAVESTATES);
+    // -1 because we want to start rolling back on the index before the current frame
+    // another -1 because our savestates are for the end of the frame, so need to go back another
+    s32 currentSavestateIdx = Wrap(currentFrame-1-1, MAX_SAVESTATES);
+    s32 endingSavestateIdx = Wrap(currentSavestateIdx - savestateOffset, MAX_SAVESTATES);
     
-    assert(savestateIdx < MAX_ROLLBACK_FRAMES && savestateIdx != currentSavestateIdx);
+    assert(endingSavestateIdx < MAX_SAVESTATES && endingSavestateIdx != currentSavestateIdx);
     #ifdef ENABLE_LOGGING
     printf("Starting at game mem frame %i\n", *GetGameMemFrame());
     printf("Rolling back %i frames from idx %i -> %i | frame %u -> %u\n", 
-                        savestateOffset, currentSavestateIdx, savestateIdx, currentFrame, rollbackFrame);
+                        savestateOffset, currentSavestateIdx, endingSavestateIdx, currentFrame, rollbackFrame);
     printf("Savestate frames stored:\n");
-    for (u32 i = 0; i < MAX_ROLLBACK_FRAMES; i++)
+    for (u32 i = 0; i < MAX_SAVESTATES; i++)
     {
         printf("| idx %u = frame %u |\t", i, savestateInfo.savestates[i].frame);
     }
@@ -154,126 +182,24 @@ void Rollback(s32 currentFrame, u32 rollbackFrame)
     // given an index into our savestates list, rollback to that.
     // go from the current index, walking backward applying each savestate's "before" snapshots
     // one at a time
-    while (currentSavestateIdx != savestateIdx)
+    while (currentSavestateIdx != endingSavestateIdx)
     {
         Savestate& savestate = savestateInfo.savestates[currentSavestateIdx];  
-        for (u32 i = 0; i < savestate.numChangedPages; i++)
-        {
-            void* orig = savestate.changedPages[i];
-            // apply the "before" state of this past frame
-            void* beforeCopy = savestate.beforeCopies[i];
-            if (orig != nullptr)
-            {
-                #ifdef ENABLE_LOGGING
-                assert(orig >= GetGameState() && orig < GetGameState() + GAMESTATE_SIZE);
-                // first 4 bytes of game mem contains current frame
-                if (orig == gameMem) 
-                {
-                    u32 nowFrame = *GetGameMemFrame();
-                    printf("rolling back %u -> %u\n", nowFrame, ((u32*)beforeCopy)[0]);
-                }
-                #endif
-                memcpy(orig, beforeCopy, pageSize);
-            }
-        }
-        #ifdef ENABLE_LOGGING
-        printf("Rolled back savestate idx %i\n", currentSavestateIdx);
-        #endif
-        currentSavestateIdx = Wrap(currentSavestateIdx-1, MAX_ROLLBACK_FRAMES);
+        RollbackSavestate(savestate);
+        currentSavestateIdx = Wrap(currentSavestateIdx-1, MAX_SAVESTATES);
     }
+    // summary - 
+    // we are on frame 15, trying to rollback to frame 10 since we didn't get inputs on frame 10, have been predicting, and just got past inputs from 10
+    // ---
+    // we start at frame 14 because all snapshots are for the end of the frame, so since we're at the beginning of frame 15, we're technically at the end of 14
+    // so we go from 14->13 by applying frame 13's changed pages, then 13->12, .... then 11->10. We stop here, but
+    // applying 11->10 actually gets us to the end of frame 10/beginning of 11. We want to be at the beginning of 10/end of 9
+    // since that's where we need to reapply the new inputs and start resimulating
+    // so we do one more at the end of this loop
+    assert(savestateInfo.savestates[currentSavestateIdx].frame == rollbackFrame-1);
+    RollbackSavestate(savestateInfo.savestates[currentSavestateIdx]);
+    assert(*GetGameMemFrame() == rollbackFrame-1);
 }
-
-// a and b are pointers to the data
-s32 cmp(void *a, void *b)
-{
-    void* data1 = *(void**)a;
-    void* data2 = *(void**)b;
-    if (data1 < data2) return -1;
-    else if (data1 > data2) return 1;
-    else return 0;
-}
-s32 binsearch(void* elt, size_t size, const void* arr, size_t length, s32 (*compare)(void*, void*))
-{
-    size_t i = length / 2;
-    char* array = (char*)arr;
-    while (i < length)
-    {
-        s32 comparison = compare(array + i * size, elt);
-        if (comparison == 0)
-        {
-            return i;
-        }
-        if (comparison < 0)
-        {
-            i += (length - i + 1) / 2;
-        }
-        else
-        {
-            length = i;
-            i /= 2;
-        }
-    }
-    return -1;
-}
-// does this savestate contain region that was just written to? If so, return that region through out
-bool DoesSavestateContainCorrespondingUnwrittenRegion(const Savestate& savestate, char* writtenRegion, void*& unwrittenRegionDataOut)
-{
-    PROFILE_FUNCTION();
-    int result = binsearch(&writtenRegion, sizeof(writtenRegion), savestate.changedPages, savestate.numChangedPages, cmp);
-    if (result == -1) return false;
-    void* returnedAddress = savestate.changedPages[result];
-    if (returnedAddress != writtenRegion) return false;
-    // becuase the savestate's changedPages and data copies indices line up, we can do this
-    unwrittenRegionDataOut = (char*)savestate.beforeCopies[result];
-    return true;
-}
-
-// this takes in a page that has been written to
-// it then searches our previous savestates (or falls back to our full snapshot)
-// to find the data from this page before it was written to
-// passed in page pointer is from game state mem. 
-// Returned pointer points to a page worth of memory
-// that has NOT had this frame's most recent changes.
-// Or to put it another way, based on the pointer to the page passed in,
-// we consider that passed in page to have just been written to.
-// This returns a block of memory that represents that same page before that write happened
-void* GetUnwrittenPageFromWrittenPage(char* newGameMemWrittenData, u32 savestateHead)
-{
-    PROFILE_FUNCTION();
-    savestateHead = Wrap(savestateHead-1, MAX_ROLLBACK_FRAMES); // don't check *this* savestate, since we're in the process of building it
-    // go through all the other savestates we have and see if they contain our new written data region
-    for (u32 i = 0; i < MAX_ROLLBACK_FRAMES-1; i++)
-    {
-        const Savestate& currentSavestate = savestateInfo.savestates[savestateHead];
-        if (!currentSavestate.valid) continue;
-        void* unwrittenRegion = nullptr;
-        if (DoesSavestateContainCorrespondingUnwrittenRegion(currentSavestate, newGameMemWrittenData, unwrittenRegion))
-        {
-            #ifdef ENABLE_LOGGING
-            printf("Found %p while looking for %p  frame %u idx %u\n", 
-                    unwrittenRegion, newGameMemWrittenData, currentSavestate.frame, savestateHead);
-            if (newGameMemWrittenData == GetGameState())
-            {
-                printf("internal unwritten page frame %u\n", *((u32*)unwrittenRegion));
-            }
-            #endif
-            // NOTE: returning pointer from our data copies. This is not from gamestate mem
-            return unwrittenRegion;
-        }
-        // go backward which checks most recent frames first. Might not really make a difference, but similar mem regions may be written in consecutive frames
-        // versus going from current savestateHead forward, we would be checking frames furthest in the past first
-        savestateHead = Wrap(savestateHead-1, MAX_ROLLBACK_FRAMES); 
-    }
-    // not found in any savestates, so we fall back to grabbing that region from the full snapshot
-    u64 writtenRegionOffsetFromBase = ((u64)newGameMemWrittenData) - ((u64)GetGameState());
-    char* unwrittenSnapshotData = savestateInfo.fullSnapshot + writtenRegionOffsetFromBase;
-    #ifdef ENABLE_LOGGING
-    printf("Fell back to full snapshot trying to find %p  snapshot mem = %p\n", newGameMemWrittenData, unwrittenSnapshotData);
-    #endif 
-    // NOTE: returning pointer from our full snapshot. This is not from gamestate mem
-    return unwrittenSnapshotData; 
-}
-
 
 void EvictSavestate(Savestate& savestate)
 {
@@ -294,7 +220,7 @@ void EvictSavestate(Savestate& savestate)
             u64 offset = ((u64)orig) - ((u64)gameMem);
             // the "original address" is relative to the game mem. Use that as an offset into our snapshot
             char* snapshotEquivalentAddress = fullSnapshot + offset;
-            memcpy(snapshotEquivalentAddress, data, pageSize);
+            rbMemcpy(snapshotEquivalentAddress, data, pageSize);
         }
     }
 
@@ -304,12 +230,10 @@ void EvictSavestate(Savestate& savestate)
         for (u32 i = 0; i < savestate.numChangedPages; i++)
         {
             mi_free(savestate.afterCopies[i]);
-            mi_free(savestate.beforeCopies[i]);
         }
     }
     { PROFILE_SCOPE("buffer clearing");
         // TODO: these are optional - put them in for sanity for now while things are still in flux
-        memset(savestate.beforeCopies, 0, sizeof(void*) * savestate.numChangedPages);
         memset(savestate.afterCopies, 0, sizeof(void*) * savestate.numChangedPages);
         memset(savestate.changedPages, 0, savestate.numChangedPages);
     }
@@ -323,38 +247,33 @@ void* AllocAndCopy(void* src, u32 size)
     PROFILE_FUNCTION();
     void* result = nullptr;
     { PROFILE_SCOPE("malloc");
-        result = mi_malloc(size);
+        result = mi_malloc_aligned(size, 32);
+        assert(IS_ALIGNED(result, 32));
     }
     assert(result);
     { PROFILE_SCOPE("memcpy");
-        memcpy(result, src, size);
+        rbMemcpy(result, src, size);
     }
     return result;
 }
 
 void OnPagesWritten(Savestate& savestate, u32 savestateHead)
 {
+    PROFILE_FUNCTION();
+    u32 pageSize = GetPageSize();
+    Savestate& currentSavestate = savestateInfo.savestates[savestateHead];
     // TODO: parallelize. Only thing that needs special attention for multithreading is the allocation step
     for (u32 i = 0; i < savestate.numChangedPages; i++)
     {
         if (!savestate.valid) continue;
         char* changedGameMemPage = (char*)savestate.changedPages[i];
         assert(changedGameMemPage >= GetGameState() && changedGameMemPage < GetGameState()+GAMESTATE_SIZE);
-        if (changedGameMemPage == GetGameState())
-        {
-            printf("[head page] ");
-        }
-        void* beforeWrittenSnapshotData = GetUnwrittenPageFromWrittenPage(changedGameMemPage, savestateHead);
-        u32 pageSize = GetPageSize();
-        Savestate& currentSavestate = savestateInfo.savestates[savestateHead];
-        void* copyOfUnWrittenPage = AllocAndCopy(beforeWrittenSnapshotData, pageSize);
-        savestate.beforeCopies[i] = copyOfUnWrittenPage;
         void* copyOfWrittenPage = AllocAndCopy(changedGameMemPage, pageSize);
         savestate.afterCopies[i] = copyOfWrittenPage;
         #ifdef ENABLE_LOGGING
         if (changedGameMemPage == GetGameState())
         {
-            printf("internal frames: current = %u\tunwritten = %u\twritten = %u\n", *GetGameMemFrame(), *(u32*)beforeWrittenSnapshotData, *(u32*)changedGameMemPage);
+            printf("[head page] internal frames: current = %u\twritten = %u\n", *GetGameMemFrame(), *(u32*)changedGameMemPage);
         }
         #endif
     }
@@ -363,7 +282,7 @@ void OnPagesWritten(Savestate& savestate, u32 savestateHead)
 void SaveWrittenPages(u32 frame)
 {
     PROFILE_FUNCTION();
-    u32 savestateHead = frame % MAX_ROLLBACK_FRAMES;
+    u32 savestateHead = frame % MAX_SAVESTATES;
     Savestate& savestate = savestateInfo.savestates[savestateHead];
     if (savestate.valid)
     {
@@ -379,7 +298,7 @@ void SaveWrittenPages(u32 frame)
     #ifdef ENABLE_LOGGING
     u64 numChangedBytes = savestate.numChangedPages * GetPageSize();
     f64 changedMB = numChangedBytes / 1024.0 / 1024.0;
-    printf("Frame %i, head = %i\nNum changed pages = %llu\tChanged MB = %f\n", 
+    printf("Frame %i, head = %i\tNum changed pages = %llu\tChanged MB = %f\n", 
             frame, savestateHead, savestate.numChangedPages, changedMB);
     #endif
 }
@@ -389,12 +308,14 @@ bool Tick(u32& frame)
     PROFILER_FRAME_MARK();
     PROFILE_FUNCTION();
     #ifdef ENABLE_LOGGING
-    printf("---------------------------\n");
+    printf("------------ FRAME %u ---------------\n", frame);
     #endif
     auto start = std::chrono::high_resolution_clock::now();
     if (frame == 0)
     {
+        #ifdef ENABLE_LOGGING
         printf("Taking full gamestate snapshot...\n");
+        #endif
         // full snapshot
         if (savestateInfo.fullSnapshot)
         {
@@ -402,34 +323,39 @@ bool Tick(u32& frame)
             savestateInfo.fullSnapshot = nullptr;
         }
         savestateInfo.fullSnapshot = (char*)mi_malloc(GAMESTATE_SIZE);
-        memcpy(savestateInfo.fullSnapshot, GetGameState(), GAMESTATE_SIZE);
+        rbMemcpy(savestateInfo.fullSnapshot, GetGameState(), GAMESTATE_SIZE);
+        #ifdef ENABLE_LOGGING
         auto stop = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(stop - start);
         auto timecount = duration.count();
         printf("Full snapshot took %llu ms\n", timecount);
+        #endif
     }
 
     constexpr u32 NUM_FRAMES_TO_ROLLBACK = 5;
     if (frame % 15 == 0 && frame > MAX_ROLLBACK_FRAMES)
     {
         // rollback
-        u32 originalFrame = frame;
-        u32 frameToRollbackTo = frame - NUM_FRAMES_TO_ROLLBACK;
+        s32 frameToRollbackTo = frame - NUM_FRAMES_TO_ROLLBACK;
+        // if we're at frame 15, and rollback to frame 10,
+        // we end up at the end of frame 9/beginning of frame 10.
         Rollback(frame, frameToRollbackTo);
         #ifdef ENABLE_LOGGING
         printf("Rolled back to frame %i\n", *GetGameMemFrame());
         #endif
         // resim
-        for (u32 i = frameToRollbackTo; i <= originalFrame; i++)
+        // if we're at beginning of frame 10, and need to get to beginning of 15,
+        // need to simulate 10->11, 11->12, 12->13, 13->14, 14->15
+        for (u32 i = frameToRollbackTo; i < frame; i++)
         {
             GameSimulateFrame(i, NUM_RANDOM_WRITES_PER_FRAME);
             // TODO: add this in since this'll have to happen too. Commented out for now to keep testing other parts of this simpler
-            //SaveWrittenPages(i);
+            SaveWrittenPages(i);
         }
         #ifdef ENABLE_LOGGING
-        printf("Resimulated back to frame %i\n", *GetGameMemFrame());
+        printf("---- END Resimulation ----\n");
         #endif
-        assert(originalFrame == *GetGameMemFrame());
+        assert(frame == *GetGameMemFrame()+1); // +1 since we should be at the end of the previous frame/beginning of this one
         ResetWrittenPages();
     }
     // mess with our game memory. This is to simulate the game sim

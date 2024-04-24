@@ -74,6 +74,7 @@ void UntrackMemory(void* ptr)
 char* TrackedAlloc(size_t size)
 {
     #ifdef _WIN32
+    // virtualalloc is always aligned to page boundaries
     void* ptr = VirtualAlloc(nullptr, size, MEM_RESERVE | MEM_COMMIT | MEM_WRITE_WATCH, PAGE_EXECUTE_READWRITE);
     HandleNewAllocationTracking(ptr, size);
     #else
@@ -153,11 +154,13 @@ bool GetAndResetWrittenPages(void** changedPageAddresses, u64* numChangedPages, 
 #include <cstdint>
 // num bytes copied must be multiple of 32
 // dest and src buffers must be 32 byte aligned
+// since our code generally always works with actual system pages of memory,
+// nearly (if not all) of our memcpys are on power-of-two aligned blocks of 4096kb
 void fastMemcpy(void *pvDest, void *pvSrc, size_t nBytes) 
 {
+    assert(IS_ALIGNED(pvDest, 32));
+    assert(IS_ALIGNED(pvSrc, 32));
     assert(nBytes % 32 == 0);
-    assert((intptr_t(pvDest) & 31) == 0);
-    assert((intptr_t(pvSrc) & 31) == 0);
     const __m256i *pSrc = reinterpret_cast<const __m256i*>(pvSrc);
     __m256i *pDest = reinterpret_cast<__m256i*>(pvDest);
     int64_t nVects = nBytes / sizeof(*pSrc);

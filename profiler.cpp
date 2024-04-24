@@ -1,5 +1,6 @@
 #include "profiler.h"
 
-#pragma warning(push, 0)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wformat"
 #include "external/tracy/TracyClient.cpp"
-#pragma warning(pop)
+#pragma clang diagnostic pop
