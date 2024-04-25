@@ -1,6 +1,6 @@
 @echo off
 
-set SOURCES=main.cpp profiler.cpp mem.cpp tiny_fixed_alloc.cpp
+set SOURCES=main.cpp profiler.cpp mem.cpp tiny_arena.cpp
 
 set COMPILER_FLAGS= -g -O0 -DDEBUG
 if ["%2"]==["release"] (
