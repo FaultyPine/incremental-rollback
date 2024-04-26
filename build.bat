@@ -1,9 +1,13 @@
 @echo off
 
 set SOURCES=main.cpp profiler.cpp mem.cpp tiny_arena.cpp job_system.cpp
-
 set COMPILER_FLAGS= -g -O0 -DDEBUG
-if ["%2"]==["release"] (
+
+:: unpack cmd line args
+for %%a in (%*) do set "%%a=1"
+
+
+if "%release%"=="1" (
     set COMPILER_FLAGS= -g -O3 -DNDEBUG 
 )
 
@@ -13,6 +17,6 @@ IF %ERRORLEVEL% NEQ 0 (echo Error:%ERRORLEVEL% && exit /b)
 
 echo Built successfully
 
-if ["%1"]==["run"] (
+if "%run%"=="1" (
     out.exe
 )
