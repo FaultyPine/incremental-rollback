@@ -3,6 +3,7 @@
 #include "mem.h"
 #include "profiler.h"
 #include "tiny_arena.h"
+#include "wiJobSystem.h"
 
 #include <set>
 
@@ -10,8 +11,9 @@
 
 #define MAX_ROLLBACK_FRAMES 7
 #define MAX_SAVESTATES (MAX_ROLLBACK_FRAMES+1)
-#define NUM_TEST_FRAMES_TO_SIMULATE 20
+#define NUM_TEST_FRAMES_TO_SIMULATE 100
 #define GAMESTATE_SIZE MEGABYTES_BYTES(170)
+#define MULTITHREAD // to turn on/off multithreading for debugging
 
 #ifdef DEBUG
 #define ENABLE_LOGGING
@@ -19,6 +21,7 @@
 // should be ~1500 for real perf testing
 constexpr u32 NUM_RANDOM_WRITES_PER_FRAME = 1500;
 constexpr u32 NUM_FRAMES_TO_ROLLBACK = MAX_ROLLBACK_FRAMES;
+constexpr u32 numWorkerThreads = 4;
 
 
 // FUTURE: go faster than memcpy - https://squadrick.dev/journal/going-faster-than-memcpy.html
@@ -68,6 +71,7 @@ struct SavestateInfo
 
 SavestateInfo savestateInfo = {};
 char* gameState = nullptr;
+static wi::jobsystem::context jobctx;
 
 inline char* GetGameState() { return gameState; }
 inline u32* GetGameMemFrame() { return (u32*)gameState; } // first 4 bytes of game mem are the current frame
@@ -77,6 +81,7 @@ void GameSimulateFrame(u32 currentFrame, u32 numWrites);
 void Init(u32& currentFrame)
 {
     PROFILE_FUNCTION();
+    wi::jobsystem::Initialize(numWorkerThreads-1); // -1 because when we do our async and join stuff, main thread also becomes a worker
     currentFrame = 0;
     char* gameMem = GetGameState();
     // gamestate is the only memory we want to track
@@ -144,6 +149,44 @@ static void RollbackSavestate(const Savestate& savestate)
     PROFILE_FUNCTION();
     char* gameMem = GetGameState();
     u32 pageSize = GetPageSize();
+    #ifdef MULTITHREAD
+    u32 pagesPerThread = savestate.numChangedPages / numWorkerThreads;
+    for (u32 i = 0; i < numWorkerThreads; i++)
+    {
+        u32 pageOffset = i * pagesPerThread;
+        wi::jobsystem::Execute(jobctx, 
+            [pageOffset, pagesPerThread, &savestate, pageSize, gameMem, i](wi::jobsystem::JobArgs args)
+            {
+                PROFILE_FUNCTION();
+                u32 endPageIdx = pageOffset + pagesPerThread;
+                for (u32 pageIdx = pageOffset; pageIdx < endPageIdx; pageIdx++)
+                {
+                    void* orig = savestate.changedPages[pageIdx];
+                    void* ssData = savestate.afterCopies[pageIdx];
+                    #ifdef ENABLE_LOGGING
+                    assert(orig >= GetGameState() && orig < GetGameState() + GAMESTATE_SIZE);
+                    // first 4 bytes of game mem contains current frame
+                    if (orig == gameMem) 
+                    {
+                        u32 nowFrame = *GetGameMemFrame();
+                        printf("rolling back %u -> %u\n", nowFrame, ((u32*)ssData)[0]);
+                    }
+                    #endif
+                    rbMemcpy(orig, ssData, pageSize);
+                }
+            }
+        );
+    }
+    if (numWorkerThreads % 2 != 0)
+    {
+        // odd number of worker threads means we can't evenly split up the work, so do the last bit here
+        u32 pageIdx = savestate.numChangedPages-1;
+        void* orig = savestate.changedPages[pageIdx];
+        void* ssData = savestate.afterCopies[pageIdx];
+        rbMemcpy(orig, ssData, pageSize);
+    }
+    wi::jobsystem::Wait(jobctx);
+    #else
     for (u32 i = 0; i < savestate.numChangedPages; i++)
     {
         PROFILE_SCOPE("rollback page");
@@ -162,6 +205,7 @@ static void RollbackSavestate(const Savestate& savestate)
         #endif
         rbMemcpy(orig, ssData, pageSize);
     }
+    #endif
 }
 
 void Rollback(s32 currentFrame, s32 rollbackFrame)
@@ -226,18 +270,13 @@ void EvictSavestate(Savestate& savestate)
 }
 
 
-void OnPagesWritten(Savestate& savestate, u32 savestateHead)
+void OnPagesWritten(Savestate& savestate)
 {
     PROFILE_FUNCTION();
     u32 pageSize = GetPageSize();
-    Savestate& currentSavestate = savestateInfo.savestates[savestateHead];
-    // TODO: parallelize. Only thing that needs special attention for multithreading is the allocation step
+    // for parallelization, need to do the allocation stuff first since this needs to be serial. Arenas are not threadsafe
     for (u32 i = 0; i < savestate.numChangedPages; i++)
     {
-        if (!savestate.valid) continue;
-        PROFILE_SCOPE("save page");
-        char* changedGameMemPage = (char*)savestate.changedPages[i];
-        assert(changedGameMemPage >= GetGameState() && changedGameMemPage < GetGameState()+GAMESTATE_SIZE);
         void* copyOfWrittenPage = savestate.afterCopies[i];
         // during resim frames, our afterCopies won't have been cleared to 0, so we don't need to realloc there
         // since while resimulating, we are just overwriting the contents of past frames with our new resim-ed stuff
@@ -245,8 +284,40 @@ void OnPagesWritten(Savestate& savestate, u32 savestateHead)
         {
             copyOfWrittenPage = arena_alloc(&savestate.arena, pageSize);
         }
-        rbMemcpy(copyOfWrittenPage, changedGameMemPage, pageSize);
         savestate.afterCopies[i] = copyOfWrittenPage;
+    }
+    #ifdef MULTITHREAD
+    u32 pagesPerThread = savestate.numChangedPages / numWorkerThreads;
+    for (u32 i = 0; i < numWorkerThreads; i++)
+    {
+        u32 pageOffset = i * pagesPerThread;
+        wi::jobsystem::Execute(jobctx, [pageOffset, pagesPerThread, pageSize, &savestate](wi::jobsystem::JobArgs args){
+            PROFILE_FUNCTION();
+            // if numWorkerThreads is 3, we do pages in chunks like this: [0,333), [333, 666), [666, 999)
+            u32 endPageIdx = pageOffset + pagesPerThread;
+            for (u32 pageIdx = pageOffset; pageIdx < endPageIdx; pageIdx++)
+            {
+                char* changedGameMemPage = (char*)savestate.changedPages[pageIdx];
+                assert(changedGameMemPage >= GetGameState() && changedGameMemPage < GetGameState()+GAMESTATE_SIZE);
+                rbMemcpy(savestate.afterCopies[pageIdx], changedGameMemPage, pageSize);
+            }
+        });
+    }
+    if (numWorkerThreads % 2 != 0)
+    {
+        // odd number of worker threads means we can't evenly split up the work, so do the last bit here
+        u32 pageIdx = savestate.numChangedPages-1;
+        char* changedGameMemPage = (char*)savestate.changedPages[pageIdx];
+        rbMemcpy(savestate.afterCopies[pageIdx], changedGameMemPage, pageSize);
+    }
+    wi::jobsystem::Wait(jobctx);
+    #else
+    for (u32 i = 0; i < savestate.numChangedPages; i++)
+    {
+        PROFILE_SCOPE("save page");
+        char* changedGameMemPage = (char*)savestate.changedPages[i];
+        assert(changedGameMemPage >= GetGameState() && changedGameMemPage < GetGameState()+GAMESTATE_SIZE);
+        rbMemcpy(savestate.afterCopies[i], changedGameMemPage, pageSize);
         #ifdef ENABLE_LOGGING
         if (changedGameMemPage == GetGameState())
         {
@@ -254,6 +325,7 @@ void OnPagesWritten(Savestate& savestate, u32 savestateHead)
         }
         #endif
     }
+    #endif
 }
 
 void SaveWrittenPages(u32 frame, bool isResim)
@@ -271,7 +343,7 @@ void SaveWrittenPages(u32 frame, bool isResim)
     savestate.valid = GetAndResetWrittenPages(savestate.changedPages, &savestate.numChangedPages, MAX_NUM_CHANGED_PAGES);
     assert(savestate.valid);
     assert(savestate.numChangedPages <= MAX_NUM_CHANGED_PAGES);
-    OnPagesWritten(savestate, savestateHead);
+    OnPagesWritten(savestate);
 
     #ifdef ENABLE_LOGGING
     u64 numChangedBytes = savestate.numChangedPages * GetPageSize();
@@ -293,7 +365,7 @@ bool Tick(u32& frame)
     if (frame % 15 == 0 && frame > MAX_ROLLBACK_FRAMES)
     {
         // rollback
-        s32 frameToRollbackTo = frame - NUM_FRAMES_TO_ROLLBACK;
+        s32 frameToRollbackTo = frame - (NUM_FRAMES_TO_ROLLBACK - (frame%4));
         // if we're at frame 15, and rollback to frame 10,
         // we end up at the end of frame 9/beginning of frame 10.
         Rollback(frame, frameToRollbackTo);
@@ -306,7 +378,6 @@ bool Tick(u32& frame)
         for (u32 i = frameToRollbackTo; i < frame; i++)
         {
             GameSimulateFrame(i, NUM_RANDOM_WRITES_PER_FRAME);
-            // TODO: add this in since this'll have to happen too. Commented out for now to keep testing other parts of this simpler
             SaveWrittenPages(i, true);
         }
         #ifdef ENABLE_LOGGING
@@ -339,6 +410,7 @@ int main()
     frame = 0;
     Init(frame);
     while (Tick(frame)) {}
+    wi::jobsystem::ShutDown();
     #ifdef _WIN32
     system("pause");
     #endif
