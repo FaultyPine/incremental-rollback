@@ -3,7 +3,7 @@
 #include "mem.h"
 #include "profiler.h"
 #include "tiny_arena.h"
-#include "wiJobSystem.h"
+#include "job_system.h"
 
 #include <set>
 
@@ -71,7 +71,7 @@ struct SavestateInfo
 
 SavestateInfo savestateInfo = {};
 char* gameState = nullptr;
-static wi::jobsystem::context jobctx;
+static jobsystem::context jobctx;
 
 inline char* GetGameState() { return gameState; }
 inline u32* GetGameMemFrame() { return (u32*)gameState; } // first 4 bytes of game mem are the current frame
@@ -81,7 +81,7 @@ void GameSimulateFrame(u32 currentFrame, u32 numWrites);
 void Init(u32& currentFrame)
 {
     PROFILE_FUNCTION();
-    wi::jobsystem::Initialize(numWorkerThreads-1); // -1 because when we do our async and join stuff, main thread also becomes a worker
+    jobsystem::Initialize(numWorkerThreads-1); // -1 because when we do our async and join stuff, main thread also becomes a worker
     currentFrame = 0;
     char* gameMem = GetGameState();
     // gamestate is the only memory we want to track
@@ -154,8 +154,8 @@ static void RollbackSavestate(const Savestate& savestate)
     for (u32 i = 0; i < numWorkerThreads; i++)
     {
         u32 pageOffset = i * pagesPerThread;
-        wi::jobsystem::Execute(jobctx, 
-            [pageOffset, pagesPerThread, &savestate, pageSize, gameMem, i](wi::jobsystem::JobArgs args)
+        jobsystem::Execute(jobctx, 
+            [pageOffset, pagesPerThread, &savestate, pageSize, gameMem, i](jobsystem::JobArgs args)
             {
                 PROFILE_FUNCTION();
                 u32 endPageIdx = pageOffset + pagesPerThread;
@@ -185,7 +185,7 @@ static void RollbackSavestate(const Savestate& savestate)
         void* ssData = savestate.afterCopies[pageIdx];
         rbMemcpy(orig, ssData, pageSize);
     }
-    wi::jobsystem::Wait(jobctx);
+    jobsystem::Wait(jobctx);
     #else
     for (u32 i = 0; i < savestate.numChangedPages; i++)
     {
@@ -291,7 +291,7 @@ void OnPagesWritten(Savestate& savestate)
     for (u32 i = 0; i < numWorkerThreads; i++)
     {
         u32 pageOffset = i * pagesPerThread;
-        wi::jobsystem::Execute(jobctx, [pageOffset, pagesPerThread, pageSize, &savestate](wi::jobsystem::JobArgs args){
+        jobsystem::Execute(jobctx, [pageOffset, pagesPerThread, pageSize, &savestate](jobsystem::JobArgs args){
             PROFILE_FUNCTION();
             // if numWorkerThreads is 3, we do pages in chunks like this: [0,333), [333, 666), [666, 999)
             u32 endPageIdx = pageOffset + pagesPerThread;
@@ -310,7 +310,7 @@ void OnPagesWritten(Savestate& savestate)
         char* changedGameMemPage = (char*)savestate.changedPages[pageIdx];
         rbMemcpy(savestate.afterCopies[pageIdx], changedGameMemPage, pageSize);
     }
-    wi::jobsystem::Wait(jobctx);
+    jobsystem::Wait(jobctx);
     #else
     for (u32 i = 0; i < savestate.numChangedPages; i++)
     {
@@ -410,7 +410,7 @@ int main()
     frame = 0;
     Init(frame);
     while (Tick(frame)) {}
-    wi::jobsystem::ShutDown();
+    jobsystem::ShutDown();
     #ifdef _WIN32
     system("pause");
     #endif

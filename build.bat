@@ -1,6 +1,6 @@
 @echo off
 
-set SOURCES=main.cpp profiler.cpp mem.cpp tiny_arena.cpp wiJobSystem.cpp
+set SOURCES=main.cpp profiler.cpp mem.cpp tiny_arena.cpp job_system.cpp
 
 set COMPILER_FLAGS= -g -O0 -DDEBUG
 if ["%2"]==["release"] (

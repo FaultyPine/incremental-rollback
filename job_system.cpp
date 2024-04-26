@@ -1,4 +1,4 @@
-#include "wiJobSystem.h"
+#include "job_system.h"
 
 #include <memory>
 #include <algorithm>
@@ -16,15 +16,8 @@
 #undef max
 #endif
 
-#ifdef PLATFORM_LINUX
-#include <pthread.h>
-#endif // PLATFORM_LINUX
 
-#ifdef PLATFORM_PS5
-#include "wiJobSystem_PS5.h"
-#endif // PLATFORM_PS5
-
-namespace wi::jobsystem
+namespace jobsystem
 {
 	struct Job
 	{
@@ -182,35 +175,11 @@ namespace wi::jobsystem
 			//assert(priority_result != 0);
 
 			// Name the thread:
-			std::wstring wthreadname = L"wi::jobsystem_" + std::to_wstring(threadID);
+			std::wstring wthreadname = L"jobsystem_" + std::to_wstring(threadID);
 			HRESULT hr = SetThreadDescription(handle, wthreadname.c_str());
 			assert(SUCCEEDED(hr));
-#elif defined(PLATFORM_LINUX)
-#define handle_error_en(en, msg) \
-               do { errno = en; perror(msg); } while (0)
-
-			int ret;
-			cpu_set_t cpuset;
-			CPU_ZERO(&cpuset);
-			size_t cpusetsize = sizeof(cpuset);
-
-			CPU_SET(threadID, &cpuset);
-			ret = pthread_setaffinity_np(worker.native_handle(), cpusetsize, &cpuset);
-			if (ret != 0)
-				handle_error_en(ret, std::string(" pthread_setaffinity_np[" + std::to_string(threadID) + ']').c_str());
-
-			// Name the thread
-			std::string thread_name = "wi::job::" + std::to_string(threadID);
-			ret = pthread_setname_np(worker.native_handle(), thread_name.c_str());
-			if (ret != 0)
-				handle_error_en(ret, std::string(" pthread_setname_np[" + std::to_string(threadID) + ']').c_str());
-#undef handle_error_en
-#elif defined(PLATFORM_PS5)
-			wi::jobsystem::ps5::SetupWorker(worker, threadID);
 #endif // _WIN32
 		}
-
-		//wi::backlog::post("wi::jobsystem Initialized with [" + std::to_string(internal_state.numCores) + " cores] [" + std::to_string(internal_state.numThreads) + " threads] (" + std::to_string((int)std::round(timer.elapsed())) + " ms)");
 	}
 
 	void ShutDown()
