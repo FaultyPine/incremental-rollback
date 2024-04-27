@@ -25,8 +25,9 @@ struct TrackedBuffer
 
 u32 GetPageSize();
 
-void TrackedFree(char* ptr);
-char* TrackedAlloc(size_t size);
+// passed in memory block MUST be allocated (at least on windows...) with VirtualAlloc and the MEM_WRITE_WATCH flag
+void TrackAlloc(void* ptr, size_t size);
+void UntrackAlloc(void* ptr);
 void PrintTrackedBuf(const TrackedBuffer& buf);
 void ResetWrittenPages();
 bool GetAndResetWrittenPages(void** changedPageAddresses, u64* numChangedPages, u64 maxEntries);

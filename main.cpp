@@ -5,6 +5,9 @@
 #include "profiler.h"
 
 #include <set>
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#undef WIN32_LEAN_AND_MEAN
 
 #define NUM_TEST_FRAMES_TO_SIMULATE 100
 #define GAMESTATE_SIZE MEGABYTES_BYTES(170)
@@ -25,21 +28,25 @@ void GameSimulateFrame(u32 currentFrame, u32 numWrites)
     u64 pageSize = (u64)GetPageSize();
     char* gameMem = GetGameState();
     if (!gameMem) return;
-    std::set<void*> writtenPages = {};
-    // for debugging. Write to the first 4 bytes of game mem every frame indicating the current 
     #ifdef ENABLE_LOGGING
     printf("Advanced internal frame %u -> %u\n", *GetGameMemFrame(), currentFrame);
     #endif
+    // first 4 bytes of the game memory will be our "internal" game frame
     *GetGameMemFrame() = currentFrame; 
+    #ifdef ENABLE_LOGGING
+    std::set<void*> writtenPages = {};
     writtenPages.insert(GetGameMemFrame());
+    #endif
     auto start = std::chrono::high_resolution_clock::now();
     // do some random writes to random spots in mem
     for (int i = 0; i < numWrites; i++)
     {
+        #ifdef ENABLE_LOGGING
         void* unalignedSpot = (void*)(gameMem + spotToWrite);
         void* pageAligned = (void*)(((u64)unalignedSpot) & ~(pageSize-1));
         *(u32*)pageAligned = currentFrame;
         writtenPages.insert(pageAligned);
+        #endif
         spotToWrite = spotToWrite - ((u64)gameMem) + pageSize + (pageSize/2);
         spotToWrite = spotToWrite % GetGamestateSize();
         *(u32*)(&gameMem[spotToWrite]) = spotToWrite; // do some arbitrary write
@@ -84,7 +91,6 @@ void Tick(s32 frame)
         printf("---- END Resimulation ----\n");
         #endif
         assert(frame == *GetGameMemFrame()+1); // +1 since we should be at the end of the previous frame/beginning of this one
-        ResetWrittenPages();
     }
     // mess with our game memory. This is to simulate the game sim
     GameSimulateFrame(frame, NUM_RANDOM_WRITES_PER_FRAME);
@@ -104,7 +110,8 @@ u32 frame = 0;
 int main()
 {
     frame = 0;
-    gameState = (char*)TrackedAlloc(GAMESTATE_SIZE);
+    // virtualalloc always allocs on page boundaries (when base addr is null)
+    gameState = (char*)VirtualAlloc(nullptr, GAMESTATE_SIZE, MEM_RESERVE | MEM_COMMIT | MEM_WRITE_WATCH, PAGE_READWRITE);
     IncrementalRBCallbacks cbs;
     cbs.getGamestateSize = GetGamestateSize;
     cbs.getGameState = GetGameState;

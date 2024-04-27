@@ -35,7 +35,7 @@ u32 GetPageSize()
 }
 
 // called on a buffer allocated with VirtualAlloc and MEM_WRITE_WATCH flag
-void HandleNewAllocationTracking(void* ptr, size_t size)
+void TrackAlloc(void* ptr, size_t size)
 {
     if (!ptr || !size)
         return;
@@ -58,7 +58,7 @@ void HandleNewAllocationTracking(void* ptr, size_t size)
     TrackedMemList.push_back(tracked_buf);
 }
 
-void UntrackMemory(void* ptr)
+void UntrackAlloc(void* ptr)
 {
     if (!ptr)
         return;
@@ -73,23 +73,6 @@ void UntrackMemory(void* ptr)
     }
 }
 
-char* TrackedAlloc(size_t size)
-{
-    #ifdef _WIN32
-    // virtualalloc is always aligned to page boundaries
-    void* ptr = VirtualAlloc(nullptr, size, MEM_RESERVE | MEM_COMMIT | MEM_WRITE_WATCH, PAGE_EXECUTE_READWRITE);
-    HandleNewAllocationTracking(ptr, size);
-    #else
-    #error Unsupported OS type
-    #endif
-    return (char*)ptr;
-}
-
-void TrackedFree(char* ptr)
-{
-    UntrackMemory(ptr);
-    free(ptr);
-}
 
 
 void PrintAddressArray(const TrackedBuffer& buf)

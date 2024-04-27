@@ -71,6 +71,8 @@
         "set": "cpp",
         "xtree": "cpp",
         "static.c": "cpp",
-        "xhash": "cpp"
+        "xhash": "cpp",
+        "list": "cpp",
+        "unordered_map": "cpp"
     }
 }

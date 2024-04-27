@@ -78,6 +78,10 @@ void Init(IncrementalRBCallbacks cb)
 {
     PROFILE_FUNCTION();
     cbs = cb;
+    if (GetGameState())
+    {
+        TrackAlloc(GetGameState(), GetGamestateSize());
+    }
     jobsystem::Initialize(numWorkerThreads-1); // -1 because when we do our async and join stuff, main thread also becomes a worker
     assert(IS_ALIGNED(GetGameState(), 32)); // for simd memcpy, need to be 32 byte aligned
     ResetWrittenPages(); // reset written pages since this is supposed to be initial state

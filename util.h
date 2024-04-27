@@ -38,7 +38,7 @@ inline T PercentOf(T x, u32 percentOutOf100)
 #define MEGABYTES_BYTES(mb) (mb*KILOBYTES_BYTES(1024))
 #define GIGABYTES_BYTES(gb) (gb*MEGABYTES_BYTES(1024))
 
-#define IS_ALIGNED(ptr, alignement) (((u64)ptr % alignement) == 0)
+#define IS_ALIGNED(ptr, alignment) (((u64)ptr % alignment) == 0)
 
 inline u32 HashBytes(char* data, u32 size)
 {

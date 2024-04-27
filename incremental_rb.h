@@ -24,7 +24,11 @@ struct IncrementalRBCallbacks
     GetGameMemFrameCb getGameMemFrame = nullptr;
 };
 
+// NOTE: gamestate pointer returned by the GetGameStateCb
+// must have been allocated with VirtualAlloc with the MEM_WRITE_WATCH flag
+// this sets our callbacks and tracks the memory block returned by GetGameStateCb and GetGamestateMemSizeCb
 void Init(IncrementalRBCallbacks cb);
+// should be called at the END of every game simulation frame. Right now, this just saves the game state
 void OnFrameEnd(s32 frame, bool isResim);
 void Shutdown();
 
