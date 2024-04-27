@@ -1,6 +1,6 @@
 @echo off
 
-set SOURCES=main.cpp profiler.cpp mem.cpp tiny_arena.cpp job_system.cpp
+set SOURCES=main.cpp incremental_rb.cpp profiler.cpp mem.cpp tiny_arena.cpp job_system.cpp
 set COMPILER_FLAGS= -g -O0 -DDEBUG
 
 :: unpack cmd line args
@@ -8,6 +8,7 @@ for %%a in (%*) do set "%%a=1"
 
 
 if "%release%"=="1" (
+    echo Release mode...
     set COMPILER_FLAGS= -g -O3 -DNDEBUG 
 )
 

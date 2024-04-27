@@ -70,6 +70,7 @@
         "span": "cpp",
         "set": "cpp",
         "xtree": "cpp",
-        "static.c": "cpp"
+        "static.c": "cpp",
+        "xhash": "cpp"
     }
 }
