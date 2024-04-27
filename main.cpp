@@ -65,7 +65,7 @@ void Tick(s32 frame)
     if (frame % 15 == 0 && frame > MAX_ROLLBACK_FRAMES)
     {
         // rollback
-        s32 frameToRollbackTo = frame - (NUM_FRAMES_TO_ROLLBACK - (frame%4));
+        s32 frameToRollbackTo = frame - NUM_FRAMES_TO_ROLLBACK;
         // if we're at frame 15, and rollback to frame 10,
         // we end up at the end of frame 9/beginning of frame 10.
         Rollback(frame, frameToRollbackTo);
