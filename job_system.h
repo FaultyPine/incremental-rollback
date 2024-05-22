@@ -3,6 +3,8 @@
 #include <functional>
 #include <atomic>
 
+// mostly yoinked from Wicked Engine by the goat János Turánszki
+
 namespace jobsystem
 {
 	void Initialize(uint32_t maxThreadCount = ~0u);
