@@ -27,5 +27,8 @@ avg ~1ms per resimulation frame to "simulate" a game frame (will be a lot slower
 +
 avg ~1ms per resimulation frame to save the new "frame delta" (aka savestate)
 
+To see some of the profiling traces I took, go to https://tracy.nereid.pl/
+Click the red Power button in the top-left, then "Open saved trace", then (download and then) select any of the traces in the `traces/` folder. The frames with abnormally long `Tick` functions are the ones where rollbacks happened.
+
 While this might not be the fastest save/load state situation we could be in - I think the importance of this technique comes from the fact that we are not hardcoding regions of memory that we deem as "relevant gamestate". 
 With this method - in theory - since we're rolling back/saving **all** regions of memory that change, there would be no concerns about desyncs, about savestates not accounting for all the relevant gamestate, or anything like that.
