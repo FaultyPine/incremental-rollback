@@ -91,7 +91,7 @@ void Init(IncrementalRBCallbacks cb)
     for (u32 i = 0; i < ARRAY_SIZE(savestateInfo.savestates); i++)
     {
         Savestate& savestate = savestateInfo.savestates[i];
-        void* backingMem = mi_malloc_aligned(savestateMemSize, 32);
+        void* backingMem = _mm_malloc(savestateMemSize, 32);
         assert(IS_ALIGNED(backingMem, 32));
         savestate.arena = arena_init(backingMem, savestateMemSize);
     }
